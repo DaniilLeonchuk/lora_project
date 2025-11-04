@@ -2,6 +2,7 @@ version: '3.8'
 services:
   postgres:
     image: postgres:13
+    container_name: lora_postgres
     environment:
       POSTGRES_DB: lora_monitoring
       POSTGRES_USER: lora_user
@@ -9,7 +10,5 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-volumes:
-  postgres_data:
+      - ./data/postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped

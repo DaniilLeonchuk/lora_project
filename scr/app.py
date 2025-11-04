@@ -8,7 +8,6 @@ def init_db():
     conn = sqlite3.connect('lora.db')
     cur = conn.cursor()
     
-    # Таблица устройств
     cur.execute('''
         CREATE TABLE IF NOT EXISTS devices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,7 +19,6 @@ def init_db():
         )
     ''')
     
-    # Таблица измерений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS measurements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +32,6 @@ def init_db():
         )
     ''')
     
-    # Реальные датчики
     cur.execute('''
         INSERT OR IGNORE INTO devices (device_id, name, sensor_type, location) 
         VALUES ('TL11_001', 'Датчик температуры ТЛ-11', 'temperature', 'Внутри контейнера')
@@ -55,11 +52,8 @@ def get_db_connection():
 @app.route('/')
 def index():
     conn = get_db_connection()
-    
-    # Получаем устройства
     devices = conn.execute('SELECT * FROM devices').fetchall()
     
-    # Получаем последние данные для каждого устройства
     devices_with_data = []
     for device in devices:
         last_measurement = conn.execute(
@@ -69,36 +63,24 @@ def index():
         devices_with_data.append((device, last_measurement))
     
     conn.close()
-    
     return render_template('index.html', devices_with_data=devices_with_data)
 
 @app.route('/device/<device_id>')
 def device_detail(device_id):
     conn = get_db_connection()
-    
-    device = conn.execute(
-        'SELECT * FROM devices WHERE device_id = ?', (device_id,)
-    ).fetchone()
-    
+    device = conn.execute('SELECT * FROM devices WHERE device_id = ?', (device_id,)).fetchone()
     measurements = conn.execute(
         'SELECT * FROM measurements WHERE device_id = ? ORDER BY received_at DESC LIMIT 50',
         (device_id,)
     ).fetchall()
-    
     conn.close()
-    
     return render_template('device.html', device=device, measurements=measurements)
 
-# API для приема данных с датчиков
 @app.route('/api/sensor_data', methods=['POST'])
 def receive_sensor_data():
-    """Основной API для приема данных с датчиков"""
     try:
         data = request.json
-        
         conn = get_db_connection()
-        
-        # Сохраняем измерение
         conn.execute('''
             INSERT INTO measurements 
             (device_id, temperature, humidity, door_open, battery_level, rssi)
@@ -106,29 +88,20 @@ def receive_sensor_data():
         ''', (data['device_id'], data.get('temperature'), data.get('humidity'),
               data.get('door_open', False), data.get('battery', 100), 
               data.get('rssi', -70)))
-        
         conn.commit()
         conn.close()
-        
         return jsonify({'status': 'success'})
-        
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# API для получения данных устройства
 @app.route('/api/device/<device_id>')
 def api_device_data(device_id):
     conn = get_db_connection()
-    
     measurements = conn.execute('''
         SELECT temperature, humidity, door_open, battery_level, rssi, received_at 
-        FROM measurements 
-        WHERE device_id = ? 
-        ORDER BY received_at DESC LIMIT 100
+        FROM measurements WHERE device_id = ? ORDER BY received_at DESC LIMIT 100
     ''', (device_id,)).fetchall()
-    
     conn.close()
-    
     data = [dict(row) for row in measurements]
     return jsonify(data)
 
