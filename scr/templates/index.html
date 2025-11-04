@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Система мониторинга контейнеров</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .device { border: 1px solid #ddd; padding: 15px; margin: 10px 0; border-radius: 5px; }
+        .device h3 { margin-top: 0; }
+        .stats { color: #666; font-size: 14px; }
+        .sensor-data { background: #f9f9f9; padding: 10px; margin: 5px 0; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>Система мониторинга контейнеров</h1>
+    
+    <h2>Датчики</h2>
+    
+    {% for device, last_measurement in devices_with_data %}
+    <div class="device">
+        <h3><a href="/device/{{ device.device_id }}">{{ device.name }}</a></h3>
+        <p class="stats">
+            ID: {{ device.device_id }}<br>
+            Тип: {{ device.sensor_type }}<br>
+            Местоположение: {{ device.location }}
+        </p>
+        
+        {% if last_measurement %}
+        <div class="sensor-data">
+            <strong>Последние данные:</strong><br>
+            🌡️ Температура: {{ "%.1f"|format(last_measurement.temperature) }}°C<br>
+            💧 Влажность: {{ "%.1f"|format(last_measurement.humidity) }}%<br>
+            🚪 Дверь: {{ "Открыта" if last_measurement.door_open else "Закрыта" }}<br>
+            🔋 Батарея: {{ "%.1f"|format(last_measurement.battery_level) }}%
+        </div>
+        {% else %}
+        <div style="color: #999; font-style: italic;">Нет данных измерений</div>
+        {% endif %}
+        
+        <small>
+            <a href="/api/simulate/{{ device.device_id }}">🎲 Добавить тестовые данные</a>
+        </small>
+    </div>
+    {% endfor %}
+    
+    <hr>
+    <p><small>Flask сервер + SQLite база данных</small></p>
+</body>
+</html>
