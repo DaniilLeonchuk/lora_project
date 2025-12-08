@@ -33,6 +33,13 @@ def init_db():
     ''')
     
     cur.execute('''
+        CREATE TABLE IF NOT EXISTS workers(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id VARCAHR(9) UNIQUE NOT NULL
+        )
+    ''')
+    
+    cur.execute('''
         INSERT OR IGNORE INTO devices (device_id, name, sensor_type, location) 
         VALUES ('TL11_001', 'Датчик температуры ТЛ-11', 'temperature', 'Внутри контейнера')
     ''')
