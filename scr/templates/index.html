@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Система мониторинга IoT</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            background-color: #4CAF50;
+            color: white;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .device-card {
+            background-color: white;
+            border-radius: 5px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .status-online {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+        .status-offline {
+            color: #f44336;
+            font-weight: bold;
+        }
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        .data-table th, .data-table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        .data-table th {
+            background-color: #f2f2f2;
+        }
+        .btn {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .btn:hover {
+            background-color: #45a049;
+        }
+        .notification {
+            background-color: #ffeb3b;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Система мониторинга IoT устройств</h1>
+            <p>Мониторинг температуры, влажности и состояния контейнеров</p>
+        </div>
+
+        <div style="margin-bottom: 20px;">
+            <a href="/api/fetch_data" class="btn">🔄 Получить данные с сервера</a>
+            <a href="/api/send_test_notification" class="btn">🔔 Тестовое уведомление</a>
+        </div>
+
+        {% for device, last_measurement in devices_with_data %}
+        <div class="device-card">
+            <h2>{{ device.name }}</h2>
+            <p><strong>ID устройства:</strong> {{ device.device_id }}</p>
+            <p><strong>Тип датчика:</strong> {{ device.sensor_type }}</p>
+            <p><strong>Местоположение:</strong> {{ device.location }}</p>
+            
+            {% if last_measurement %}
+            <div style="margin-top: 15px;">
+                <h3>Последние данные:</h3>
+                <table class="data-table">
+                    <tr>
+                        <th>Параметр</th>
+                        <th>Значение</th>
+                        <th>Время</th>
+                    </tr>
+                    {% if last_measurement.temperature %}
+                    <tr>
+                        <td>Температура</td>
+                        <td>{{ "%.1f"|format(last_measurement.temperature) }}°C</td>
+                        <td>{{ last_measurement.received_at }}</td>
+                    </tr>
+                    {% endif %}
+                    {% if last_measurement.humidity %}
+                    <tr>
+                        <td>Влажность</td>
+                        <td>{{ "%.0f"|format(last_measurement.humidity) }}%</td>
+                        <td>{{ last_measurement.received_at }}</td>
+                    </tr>
+                    {% endif %}
+                    {% if last_measurement.battery_level %}
+                    <tr>
+                        <td>Батарея</td>
+                        <td>{{ "%.0f"|format(last_measurement.battery_level) }}%</td>
+                        <td>{{ last_measurement.received_at }}</td>
+                    </tr>
+                    {% endif %}
+                    {% if last_measurement.door_open is not none %}
+                    <tr>
+                        <td>Состояние двери</td>
+                        <td>
+                            {% if last_measurement.door_open %}
+                            <span style="color: red;">Открыта</span>
+                            {% else %}
+                            <span style="color: green;">Закрыта</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ last_measurement.received_at }}</td>
+                    </tr>
+                    {% endif %}
+                </table>
+            </div>
+            <a href="/device/{{ device.device_id }}" class="btn" style="margin-top: 10px;">
+                📈 Подробная история
+            </a>
+            {% else %}
+            <p style="color: #666;">Нет данных от устройства</p>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+
+    <script>
+        // Автообновление данных каждые 30 секунд
+        setTimeout(function() {
+            window.location.reload();
+        }, 30000);
+    </script>
+</body>
+</html>

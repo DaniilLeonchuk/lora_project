@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ device.name }} - История данных</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            background-color: #2196F3;
+            color: white;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .back-btn {
+            background-color: #757575;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            background-color: white;
+        }
+        .data-table th, .data-table td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+        .data-table th {
+            background-color: #f2f2f2;
+            position: sticky;
+            top: 0;
+        }
+        .data-table tr:hover {
+            background-color: #f5f5f5;
+        }
+        .status-open {
+            color: red;
+            font-weight: bold;
+        }
+        .status-closed {
+            color: green;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="/" class="back-btn">← Назад к списку устройств</a>
+        
+        <div class="header">
+            <h1>{{ device.name }}</h1>
+            <p><strong>ID:</strong> {{ device.device_id }} | 
+               <strong>Тип:</strong> {{ device.sensor_type }} | 
+               <strong>Местоположение:</strong> {{ device.location }}</p>
+        </div>
+
+        <h2>📊 История измерений</h2>
+        
+        {% if measurements %}
+        <div style="overflow-x: auto;">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Время</th>
+                        <th>Температура</th>
+                        <th>Температура 2</th>
+                        <th>Влажность</th>
+                        <th>Дверь 1</th>
+                        <th>Дверь 2</th>
+                        <th>Батарея</th>
+                        <th>Угол</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for measurement in measurements %}
+                    <tr>
+                        <td>{{ measurement.received_at }}</td>
+                        <td>
+                            {% if measurement.temperature %}
+                            {{ "%.1f"|format(measurement.temperature) }}°C
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if measurement.temperature2 %}
+                            {{ "%.1f"|format(measurement.temperature2) }}°C
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if measurement.humidity %}
+                            {{ "%.0f"|format(measurement.humidity) }}%
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if measurement.door_open is not none %}
+                                {% if measurement.door_open %}
+                                <span class="status-open">Открыта</span>
+                                {% else %}
+                                <span class="status-closed">Закрыта</span>
+                                {% endif %}
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if measurement.door_open2 is not none %}
+                                {% if measurement.door_open2 %}
+                                <span class="status-open">Открыта</span>
+                                {% else %}
+                                <span class="status-closed">Закрыта</span>
+                                {% endif %}
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if measurement.battery_level %}
+                            {{ "%.0f"|format(measurement.battery_level) }}%
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if measurement.corner %}
+                            {{ measurement.corner }}°
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p>Нет данных для отображения</p>
+        {% endif %}
+    </div>
+
+    <script>
+        // Автообновление страницы каждые 60 секунд
+        setTimeout(function() {
+            window.location.reload();
+        }, 60000);
+    </script>
+</body>
+</html>
