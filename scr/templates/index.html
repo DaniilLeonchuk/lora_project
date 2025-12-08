@@ -78,8 +78,8 @@
         </div>
 
         <div style="margin-bottom: 20px;">
-            <a href="/api/fetch_data" class="btn">🔄 Получить данные с сервера</a>
-            <a href="/api/send_test_notification" class="btn">🔔 Тестовое уведомление</a>
+            <a href="/fetch_data" class="btn">🔄 Получить данные с сервера</a>
+            <a href="/send_test_notification" class="btn btn-warning">🔔 Тестовое уведомление</a>
         </div>
 
         {% for device, last_measurement in devices_with_data %}
@@ -87,7 +87,7 @@
             <h2>{{ device.name }}</h2>
             <p><strong>ID устройства:</strong> {{ device.device_id }}</p>
             <p><strong>Тип датчика:</strong> {{ device.sensor_type }}</p>
-            <p><strong>Местоположение:</strong> {{ device.location }}</p>
+            
             
             {% if last_measurement %}
             <div style="margin-top: 15px;">

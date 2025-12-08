@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, redirect, url_for, flash
 import sqlite3
 from datetime import datetime
 import json
@@ -7,11 +7,11 @@ import websockets
 import calendar
 import time
 import threading
-import schedule
 import requests
 from functools import wraps
 
 app = Flask(__name__)
+app.secret_key = 'your-secret-key-here'  # Для работы flash сообщений
 
 # Конфигурация
 TOKEN = '7916126911:AAEXs_-9dTaMLXRKZY4-0wUdRFgGl8iTGTY'
@@ -22,7 +22,7 @@ DEVICE_EUI = "3139303459316A0B"
 
 # Пороги для уведомлений (можно настроить)
 THRESHOLDS = {
-    'temperature_min': -20,
+    'temperature_min': -10,
     'temperature_max': 40,
     'humidity_min': 20,
     'humidity_max': 80,
@@ -31,6 +31,9 @@ THRESHOLDS = {
 
 # Кэш для хранения ID чатов Telegram
 telegram_chats = set()
+
+# Флаг для отслеживания состояния соединения
+iot_server_available = False
 
 # Инициализация базы данных
 def init_db():
@@ -90,13 +93,13 @@ def init_db():
     
     # Добавляем тестовые устройства
     cur.execute('''
-        INSERT OR IGNORE INTO devices (device_id, name, sensor_type, location) 
-        VALUES ('TL11_001', 'Датчик температуры ТЛ-11', 'temperature', 'Внутри контейнера')
-    ''')
+    INSERT OR REPLACE INTO devices (device_id, name, sensor_type, location) 
+    VALUES ('TL11_001', 'Вега ТЛ-11', 'температуры', '')
+''')
     cur.execute('''
-        INSERT OR IGNORE INTO devices (device_id, name, sensor_type, location) 
-        VALUES ('HS0101_001', 'Датчик контроля SMART-HS0101', 'multi_sensor', 'Снаружи контейнера')
-    ''')
+    INSERT OR REPLACE INTO devices (device_id, name, sensor_type, location) 
+    VALUES ('HS0101_001', 'Вега Smart-HS0101', 'влажности, открытия/закрытия', '')
+''')
     
     conn.commit()
     conn.close()
@@ -384,9 +387,15 @@ def save_measurement(device_id, parsed_data):
 # Асинхронное получение данных с IoT сервера
 async def fetch_iot_data_async():
     """Асинхронная функция для получения данных с IoT сервера"""
+    global iot_server_available
+    
     try:
-        async with websockets.connect(SERVER_URL, open_timeout=30) as websocket:
-            print(f"Подключено к серверу {SERVER_URL}")
+        print(f"Попытка подключения к серверу {SERVER_URL}...")
+        
+        # Уменьшаем таймаут для быстрого обнаружения недоступности
+        async with websockets.connect(SERVER_URL, open_timeout=10, close_timeout=5) as websocket:
+            iot_server_available = True
+            print(f"✅ Подключено к серверу {SERVER_URL}")
 
             # 1. Авторизация
             auth_request = {
@@ -419,7 +428,7 @@ async def fetch_iot_data_async():
                     data = json.loads(response)
                     
                     if data.get("cmd") == "get_data_resp":
-                        print("Получены данные устройства")
+                        print("✅ Получены данные устройства")
                         
                         # Обработка данных
                         if "data_list" in data:
@@ -447,7 +456,8 @@ async def fetch_iot_data_async():
                 print(f"Ошибка авторизации: {auth_data.get('err_string', 'Неизвестная ошибка')}")
 
     except Exception as e:
-        print(f"Ошибка при получении данных: {e}")
+        iot_server_available = False
+        print(f"❌ Ошибка при получении данных: {e}")
 
 def fetch_iot_data_sync():
     """Синхронная обертка для асинхронной функции"""
@@ -457,19 +467,24 @@ def fetch_iot_data_sync():
         asyncio.set_event_loop(loop)
         loop.run_until_complete(fetch_iot_data_async())
         loop.close()
+        return True, "Данные успешно получены"
     except Exception as e:
-        print(f"Ошибка в синхронной обертке: {e}")
+        return False, f"Ошибка: {str(e)}"
 
 # Фоновая задача для получения данных
 def background_fetch():
     """Фоновая задача для регулярного получения данных"""
     while True:
         try:
-            fetch_iot_data_sync()
+            success, message = fetch_iot_data_sync()
+            if success:
+                print(f"✅ {message}")
+            else:
+                print(f"❌ {message}")
             # Ждем 60 секунд перед следующим запросом
             time.sleep(60)
         except Exception as e:
-            print(f"Ошибка в фоновой задаче: {e}")
+            print(f"❌ Ошибка в фоновой задаче: {e}")
             time.sleep(10)
 
 # Маршруты Flask
@@ -486,8 +501,21 @@ def index():
         ).fetchone()
         devices_with_data.append((device, last_measurement))
     
+    # Получаем последние уведомления
+    notifications = conn.execute('SELECT * FROM notifications ORDER BY sent_at DESC LIMIT 5').fetchall()
+    
+    # Получаем статистику
+    total_measurements = conn.execute('SELECT COUNT(*) FROM measurements').fetchone()[0]
+    total_notifications = conn.execute('SELECT COUNT(*) FROM notifications').fetchone()[0]
+    
     conn.close()
-    return render_template('index.html', devices_with_data=devices_with_data)
+    
+    return render_template('index.html', 
+                          devices_with_data=devices_with_data,
+                          notifications=notifications,
+                          total_measurements=total_measurements,
+                          total_notifications=total_notifications,
+                          iot_server_available=iot_server_available)
 
 @app.route('/device/<device_id>')
 def device_detail(device_id):
@@ -537,7 +565,7 @@ def receive_sensor_data():
 
 @app.route('/api/device/<device_id>')
 def api_device_data(device_id):
-    """API для получения данных устройства"""
+    """API для получения данных устройства (для API клиентов)"""
     conn = get_db_connection()
     measurements = conn.execute('''
         SELECT temperature, humidity, door_open, battery_level, rssi, received_at 
@@ -547,36 +575,58 @@ def api_device_data(device_id):
     data = [dict(row) for row in measurements]
     return jsonify(data)
 
-@app.route('/api/fetch_data')
-def api_fetch_data():
-    """Ручной запуск получения данных (синхронная версия)"""
+@app.route('/fetch_data')
+def fetch_data():
+    """Ручной запуск получения данных с возвратом на главную страницу"""
     try:
-        # Запускаем в отдельном потоке, чтобы не блокировать ответ Flask
-        import threading
+        # Запускаем в отдельном потоке
         thread = threading.Thread(target=fetch_iot_data_sync, daemon=True)
         thread.start()
-        return jsonify({'status': 'fetching', 'message': 'Запрос данных запущен в фоне'})
+        flash('✅ Запрос данных с IoT сервера запущен в фоне', 'success')
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        flash(f'❌ Ошибка при запуске запроса: {str(e)}', 'error')
+    
+    return redirect(url_for('index'))
 
-@app.route('/api/send_test_notification')
-def api_send_test_notification():
-    """Отправка тестового уведомления"""
+@app.route('/send_test_notification')
+def send_test_notification():
+    """Отправка тестового уведомления с возвратом на главную страницу"""
     message = "🔔 <b>Тестовое уведомление</b>\nЭто тестовое сообщение от системы мониторинга."
     send_notification_to_all(message)
-    return jsonify({'status': 'test_notification_sent'})
+    flash('✅ Тестовое уведомление отправлено в Telegram', 'success')
+    return redirect(url_for('index'))
 
-@app.route('/api/thresholds', methods=['GET', 'POST'])
-def api_thresholds():
-    """Управление порогами"""
+@app.route('/notifications')
+def show_notifications():
+    """Страница со всеми уведомлениями"""
+    conn = get_db_connection()
+    notifications = conn.execute('SELECT * FROM notifications ORDER BY sent_at DESC').fetchall()
+    conn.close()
+    return render_template('notifications.html', notifications=notifications)
+
+@app.route('/settings', methods=['GET', 'POST'])
+def settings():
+    """Страница настроек"""
     if request.method == 'POST':
-        data = request.json
-        for key, value in data.items():
-            if key in THRESHOLDS:
-                THRESHOLDS[key] = value
-        return jsonify({'status': 'updated', 'thresholds': THRESHOLDS})
+        # Обновляем пороги
+        THRESHOLDS['temperature_min'] = float(request.form.get('temperature_min', THRESHOLDS['temperature_min']))
+        THRESHOLDS['temperature_max'] = float(request.form.get('temperature_max', THRESHOLDS['temperature_max']))
+        THRESHOLDS['humidity_min'] = float(request.form.get('humidity_min', THRESHOLDS['humidity_min']))
+        THRESHOLDS['humidity_max'] = float(request.form.get('humidity_max', THRESHOLDS['humidity_max']))
+        THRESHOLDS['battery_min'] = float(request.form.get('battery_min', THRESHOLDS['battery_min']))
+        
+        flash('✅ Настройки успешно сохранены', 'success')
+        return redirect(url_for('settings'))
     
-    return jsonify(THRESHOLDS)
+    return render_template('settings.html', thresholds=THRESHOLDS)
+
+@app.route('/workers')
+def show_workers():
+    """Страница со списком подписчиков"""
+    conn = get_db_connection()
+    workers = conn.execute('SELECT * FROM workers ORDER BY added_at DESC').fetchall()
+    conn.close()
+    return render_template('workers.html', workers=workers, telegram_chats=telegram_chats)
 
 # Запуск фоновой задачи
 def start_background_tasks():
