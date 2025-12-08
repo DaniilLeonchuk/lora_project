@@ -1,5 +1,4 @@
 Flask==2.3.3
-smsmobileapi==1.0.0
 sqlite3
 datetime
 json
