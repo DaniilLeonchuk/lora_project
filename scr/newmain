@@ -1,0 +1,647 @@
+from flask import Flask, render_template, jsonify, request, redirect, url_for, flash
+import sqlite3
+from datetime import datetime
+import json
+import asyncio
+import websockets
+import calendar
+import time
+import threading
+import requests
+
+app = Flask(__name__)
+app.secret_key = 'your-secret-key-here'
+
+# Конфигурация
+TOKEN = '7916126911:AAEXs_-9dTaMLXRKZY4-0wUdRFgGl8iTGTY'
+SERVER_URL = "ws://10.101.18.28:8002"
+LOGIN = "temp"
+PASSWORD = "123"
+# Теперь будем получать данные от всех устройств
+DEVICE_EUIS = [
+    "3139303459316A0B",  # Первое устройство
+    # Добавьте здесь другие device_eui
+]
+
+# Пороги для уведомлений
+THRESHOLDS = {
+    'temperature_min': -20,
+    'temperature_max': 40,
+    'humidity_min': 20,
+    'humidity_max': 80,
+    'battery_min': 20
+}
+
+# Кэш для хранения ID чатов Telegram
+telegram_chats = set()
+
+# Флаг для отслеживания состояния соединения
+iot_server_available = False
+
+# Словарь для сопоставления device_eui с названиями устройств
+DEVICE_MAPPING = {
+    # Здесь вы должны сопоставить реальные device_eui с вашими названиями
+    # Пример:
+    # "3139303459316A0B": "HS0101_001",
+    # "another_device_eui": "TL11_001",
+}
+
+# Инициализация базы данных
+def init_db():
+    conn = sqlite3.connect('lora.db')
+    cur = conn.cursor()
+    
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_eui VARCHAR(50) UNIQUE NOT NULL,
+            device_id VARCHAR(50),
+            name VARCHAR(100),
+            sensor_type VARCHAR(50),
+            location VARCHAR(200),
+            installation_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS measurements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_eui VARCHAR(50),
+            device_id VARCHAR(50),
+            device_type VARCHAR(20),
+            temperature DECIMAL(5,2),
+            temperature2 DECIMAL(5,2),
+            humidity DECIMAL(5,2),
+            door_open BOOLEAN,
+            door_open2 BOOLEAN,
+            battery_level DECIMAL(5,2),
+            rssi INTEGER,
+            corner INTEGER,
+            low_humidity DECIMAL(5,2),
+            up_humidity DECIMAL(5,2),
+            low_temperature DECIMAL(5,2),
+            up_temperature DECIMAL(5,2),
+            received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            raw_data TEXT
+        )
+    ''')
+    
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS workers(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id VARCHAR(50) UNIQUE NOT NULL,
+            name VARCHAR(100),
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS notifications(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id VARCHAR(50),
+            message TEXT,
+            notification_type VARCHAR(50),
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Добавляем тестовые устройства (с device_eui если знаем)
+    # Если device_eui неизвестны, оставляем NULL
+    cur.execute('''
+        INSERT OR REPLACE INTO devices (device_eui, device_id, name, sensor_type, location) 
+        VALUES (NULL, 'HS0101_001', 'Вега Smart-HS0101', 'влажности, открытия/закрытия', '')
+    ''')
+    cur.execute('''
+        INSERT OR REPLACE INTO devices (device_eui, device_id, name, sensor_type, location) 
+        VALUES (NULL, 'TL11_001', 'Вега ТЛ-11', 'температуры', '')
+    ''')
+    
+    conn.commit()
+    conn.close()
+    print("База данных инициализирована")
+
+def get_db_connection():
+    conn = sqlite3.connect('lora.db')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# Функции для работы с Telegram (оставляем без изменений)
+def get_telegram_updates(token):
+    """Получаем обновления от Telegram бота"""
+    url = f'https://api.telegram.org/bot{token}/getUpdates'
+    try:
+        response = requests.get(url, timeout=10)
+        response_data = response.json()
+        
+        if response_data.get('ok'):
+            for update in response_data['result']:
+                if 'message' in update and 'chat' in update['message']:
+                    chat_id = update['message']['chat']['id']
+                    telegram_chats.add(chat_id)
+                    
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute('''
+                        INSERT OR IGNORE INTO workers (telegram_id) 
+                        VALUES (?)
+                    ''', (str(chat_id),))
+                    conn.commit()
+                    conn.close()
+                    
+            return telegram_chats
+    except Exception as e:
+        print(f"Ошибка при получении обновлений Telegram: {e}")
+    return set()
+
+def send_telegram_message(token, chat_id, message):
+    """Отправляем сообщение в Telegram"""
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        'chat_id': chat_id,
+        'text': message,
+        'parse_mode': 'HTML'
+    }
+    try:
+        response = requests.post(url, data=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"Ошибка при отправке сообщения в Telegram: {e}")
+        return None
+
+def send_notification_to_all(message):
+    """Отправляем уведомление всем подписчикам"""
+    get_telegram_updates(TOKEN)
+    
+    for chat_id in telegram_chats:
+        send_telegram_message(TOKEN, chat_id, message)
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO notifications (message, notification_type)
+        VALUES (?, 'threshold')
+    ''', (message,))
+    conn.commit()
+    conn.close()
+
+# Функции для парсинга данных (оставляем без изменений)
+def parse_hs0101_data(hex_string):
+    """Парсим данные от датчика HS0101"""
+    try:
+        if len(hex_string) != 32:
+            print(f"HS0101: Неправильная длина данных: {len(hex_string)}, ожидается 32")
+            return None
+            
+        lenghts = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+        result = []
+        start = 0
+        
+        for lent in lenghts:
+            if start + lent <= len(hex_string):
+                result.append(hex_string[start:start+lent])
+                start += lent
+            else:
+                result.append(hex_string[start:])
+        
+        packet = result[0].lstrip('0')
+        battery = int(result[1], 16)
+        
+        time_hex = result[5] + result[4] + result[3] + result[2]
+        timestamp = int(time_hex, 16)
+        dt_object = datetime.fromtimestamp(timestamp)
+        
+        temp_hex = result[7] + result[6]
+        temperature = int(temp_hex, 16) / 10
+        
+        humidity = int(result[8], 16)
+        
+        door_open = int(result[9], 16) == 0
+        door_open2 = int(result[10], 16) == 0
+        
+        corner = int(result[11], 16)
+        
+        low_humidity = int(result[12], 16)
+        up_humidity = int(result[13], 16)
+        
+        low_temperature = int(result[14], 16)
+        up_temperature = int(result[15], 16)
+        
+        if low_temperature >= 128:
+            low_temperature = low_temperature - 256
+        
+        if up_temperature >= 128:
+            up_temperature = up_temperature - 256
+        
+        return {
+            'device_type': 'HS0101',
+            'packet_type': packet,
+            'battery': battery,
+            'timestamp': dt_object,
+            'temperature': temperature,
+            'humidity': humidity,
+            'door_open': door_open,
+            'door_open2': door_open2,
+            'corner': corner,
+            'low_humidity': low_humidity,
+            'up_humidity': up_humidity,
+            'low_temperature': low_temperature,
+            'up_temperature': up_temperature,
+            'raw_data': hex_string
+        }
+        
+    except Exception as e:
+        print(f"Ошибка парсинга HS0101: {e}, данные: {hex_string}")
+        return None
+
+def parse_tl11_data(hex_string):
+    """Парсим данные от датчика TL11"""
+    try:
+        if len(hex_string) != 20:
+            print(f"TL11: Неправильная длина данных: {len(hex_string)}, ожидается 20")
+            return None
+            
+        lenghts = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+        result = []
+        start = 0
+        
+        for lent in lenghts:
+            if start + lent <= len(hex_string):
+                result.append(hex_string[start:start+lent])
+                start += lent
+            else:
+                result.append(hex_string[start:])
+        
+        battery = int(result[0], 16)
+        
+        time_hex = result[4] + result[3] + result[2] + result[1]
+        timestamp = int(time_hex, 16)
+        dt_object = datetime.fromtimestamp(timestamp)
+        
+        temp_hex = result[6] + result[5]
+        temperature = int(temp_hex, 16) / 10
+        
+        temp2_hex = result[8] + result[7]
+        temperature2 = int(temp2_hex, 16) / 10
+        
+        up_temperature = int(result[9], 16)
+        
+        return {
+            'device_type': 'TL11',
+            'battery': battery,
+            'timestamp': dt_object,
+            'temperature': temperature,
+            'temperature2': temperature2,
+            'up_temperature': up_temperature,
+            'raw_data': hex_string
+        }
+        
+    except Exception as e:
+        print(f"Ошибка парсинга TL11: {e}, данные: {hex_string}")
+        return None
+
+# Функция для определения типа устройства по данным
+def detect_device_type(hex_string):
+    """Определяем тип устройства по формату данных"""
+    length = len(hex_string)
+    
+    if length == 32:
+        return 'HS0101'
+    elif length == 20:
+        return 'TL11'
+    else:
+        print(f"Неизвестный формат данных. Длина: {length}, данные: {hex_string}")
+        return None
+
+# Проверка порогов и отправка уведомлений
+def check_thresholds_and_notify(device_id, data):
+    """Проверяем данные на превышение порогов и отправляем уведомления"""
+    messages = []
+    
+    if 'temperature' in data:
+        temp = data['temperature']
+        if temp < THRESHOLDS['temperature_min']:
+            messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
+                          f"Устройство: {device_id}\n"
+                          f"Температура ниже порога: {temp}°C < {THRESHOLDS['temperature_min']}°C")
+        
+        elif temp > THRESHOLDS['temperature_max']:
+            messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
+                          f"Устройство: {device_id}\n"
+                          f"Температура выше порога: {temp}°C > {THRESHOLDS['temperature_max']}°C")
+    
+    if 'humidity' in data:
+        humid = data['humidity']
+        if humid < THRESHOLDS['humidity_min']:
+            messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
+                          f"Устройство: {device_id}\n"
+                          f"Влажность ниже порога: {humid}% < {THRESHOLDS['humidity_min']}%")
+        
+        elif humid > THRESHOLDS['humidity_max']:
+            messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
+                          f"Устройство: {device_id}\n"
+                          f"Влажность выше порога: {humid}% > {THRESHOLDS['humidity_max']}%")
+    
+    if 'battery' in data and data['battery'] < THRESHOLDS['battery_min']:
+        messages.append(f"🔋 <b>Низкий заряд батареи!</b>\n"
+                       f"Устройство: {device_id}\n"
+                       f"Заряд: {data['battery']}% < {THRESHOLDS['battery_min']}%")
+    
+    if data.get('door_open'):
+        messages.append(f"🚨 <b>ДВЕРЬ ОТКРЫТА!</b>\n"
+                       f"Устройство: {device_id}\n"
+                       f"Время: {data['timestamp']}")
+    
+    if data.get('door_open2'):
+        messages.append(f"🚨 <b>ВТОРАЯ ДВЕРЬ ОТКРЫТА!</b>\n"
+                       f"Устройство: {device_id}\n"
+                       f"Время: {data['timestamp']}")
+    
+    for message in messages:
+        print(f"Отправка уведомления: {message}")
+        send_notification_to_all(message)
+    
+    return len(messages) > 0
+
+# Сохранение данных в базу
+def save_measurement(device_eui, device_id, device_type, parsed_data):
+    """Сохраняем данные в базу данных"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # Сначала обновляем device_eui в таблице devices если нужно
+        if device_eui and device_id:
+            cur.execute('''
+                UPDATE devices 
+                SET device_eui = ?
+                WHERE device_id = ? AND (device_eui IS NULL OR device_eui != ?)
+            ''', (device_eui, device_id, device_eui))
+        
+        if device_type == 'HS0101':
+            cur.execute('''
+                INSERT INTO measurements 
+                (device_eui, device_id, device_type, temperature, humidity, door_open, door_open2, 
+                 battery_level, corner, low_humidity, up_humidity, 
+                 low_temperature, up_temperature, raw_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (device_eui, device_id, device_type, 
+                  parsed_data['temperature'], parsed_data['humidity'],
+                  parsed_data['door_open'], parsed_data['door_open2'],
+                  parsed_data['battery'], parsed_data['corner'],
+                  parsed_data['low_humidity'], parsed_data['up_humidity'],
+                  parsed_data['low_temperature'], parsed_data['up_temperature'],
+                  parsed_data['raw_data']))
+        
+        elif device_type == 'TL11':
+            cur.execute('''
+                INSERT INTO measurements 
+                (device_eui, device_id, device_type, temperature, temperature2, battery_level, raw_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (device_eui, device_id, device_type,
+                  parsed_data['temperature'], parsed_data['temperature2'], 
+                  parsed_data['battery'], parsed_data['raw_data']))
+        
+        conn.commit()
+        print(f"✅ Данные сохранены: Device EUI: {device_eui}, ID: {device_id}, Type: {device_type}")
+        
+        check_thresholds_and_notify(device_id, parsed_data)
+        
+    except Exception as e:
+        print(f"❌ Ошибка при сохранении данных: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+# Функция для обработки данных от устройства
+def process_device_data(device_eui, hex_data):
+    """Обрабатываем данные от устройства"""
+    try:
+        # Определяем тип устройства
+        device_type = detect_device_type(hex_data)
+        if not device_type:
+            print(f"Не удалось определить тип устройства для EUI: {device_eui}")
+            return
+        
+        # Парсим данные в зависимости от типа устройства
+        if device_type == 'HS0101':
+            parsed_data = parse_hs0101_data(hex_data)
+            device_id = 'HS0101_001'  # Предполагаем, что это HS0101
+        elif device_type == 'TL11':
+            parsed_data = parse_tl11_data(hex_data)
+            device_id = 'TL11_001'    # Предполагаем, что это TL11
+        else:
+            print(f"Неизвестный тип устройства: {device_type}")
+            return
+        
+        if parsed_data:
+            save_measurement(device_eui, device_id, device_type, parsed_data)
+        else:
+            print(f"Не удалось распарсить данные для EUI: {device_eui}")
+            
+    except Exception as e:
+        print(f"Ошибка при обработке данных устройства {device_eui}: {e}")
+
+# Асинхронное получение данных с IoT сервера
+async def fetch_iot_data_async():
+    """Асинхронная функция для получения данных с IoT сервера"""
+    global iot_server_available
+    
+    try:
+        print(f"Попытка подключения к серверу {SERVER_URL}...")
+        
+        async with websockets.connect(SERVER_URL, open_timeout=10, close_timeout=5) as websocket:
+            iot_server_available = True
+            print(f"✅ Подключено к серверу {SERVER_URL}")
+
+            # 1. Авторизация
+            auth_request = {
+                "cmd": "auth_req",
+                "login": LOGIN,
+                "password": PASSWORD
+            }
+            await websocket.send(json.dumps(auth_request))
+            auth_response = await websocket.recv()
+            auth_data = json.loads(auth_response)
+
+            if auth_data.get("status") is True and "token" in auth_data:
+                token = auth_data["token"]
+                print(f"Авторизация успешна. Получен токен: {token}")
+
+                # 2. Запрашиваем данные для всех устройств
+                for device_eui in DEVICE_EUIS:
+                    print(f"Запрашиваем данные для устройства: {device_eui}")
+                    
+                    data_request = {
+                        "cmd": "get_data_req",
+                        "devEui": device_eui,
+                        "direction": "UPLINK",
+                        "select": {
+                            "date_from": calendar.timegm(time.strptime('2025-04-12 15:00:00', '%Y-%m-%d %H:%M:%S'))
+                        }
+                    }
+                    await websocket.send(json.dumps(data_request))
+                    
+                    try:
+                        # Ждем ответа с таймаутом
+                        response = await asyncio.wait_for(websocket.recv(), timeout=10)
+                        data = json.loads(response)
+                        
+                        if data.get("cmd") == "get_data_resp":
+                            print(f"✅ Получены данные для устройства {device_eui}")
+                            
+                            if "data_list" in data:
+                                for item in data["data_list"]:
+                                    if "data" in item:
+                                        hex_data = item["data"]
+                                        print(f"Обрабатываем данные: {hex_data}")
+                                        process_device_data(device_eui, hex_data)
+                            else:
+                                print(f"Нет данных в ответе для устройства {device_eui}")
+                                
+                        elif data.get("status") is False:
+                            print(f"❌ Ошибка для устройства {device_eui}: {data.get('err_string')}")
+                            
+                    except asyncio.TimeoutError:
+                        print(f"Таймаут при ожидании ответа от устройства {device_eui}")
+                        continue
+                    except Exception as e:
+                        print(f"Ошибка при обработке ответа от устройства {device_eui}: {e}")
+                        continue
+
+            else:
+                print(f"Ошибка авторизации: {auth_data.get('err_string', 'Неизвестная ошибка')}")
+
+    except Exception as e:
+        iot_server_available = False
+        print(f"❌ Ошибка при получении данных: {e}")
+
+# Остальные функции остаются без изменений...
+def fetch_iot_data_sync():
+    """Синхронная обертка для асинхронной функции"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(fetch_iot_data_async())
+        loop.close()
+        return True, "Данные успешно получены"
+    except Exception as e:
+        return False, f"Ошибка: {str(e)}"
+
+# Фоновая задача для получения данных
+def background_fetch():
+    """Фоновая задача для регулярного получения данных"""
+    while True:
+        try:
+            success, message = fetch_iot_data_sync()
+            if success:
+                print(f"✅ {message}")
+            else:
+                print(f"❌ {message}")
+            time.sleep(60)
+        except Exception as e:
+            print(f"❌ Ошибка в фоновой задаче: {e}")
+            time.sleep(10)
+
+# Маршруты Flask
+@app.route('/')
+def index():
+    conn = get_db_connection()
+    devices = conn.execute('SELECT * FROM devices').fetchall()
+    
+    devices_with_data = []
+    for device in devices:
+        last_measurement = conn.execute(
+            'SELECT * FROM measurements WHERE device_id = ? ORDER BY id DESC LIMIT 1',
+            (device['device_id'],)
+        ).fetchone()
+        devices_with_data.append((device, last_measurement))
+    
+    notifications = conn.execute('SELECT * FROM notifications ORDER BY sent_at DESC LIMIT 5').fetchall()
+    
+    total_measurements = conn.execute('SELECT COUNT(*) FROM measurements').fetchone()[0]
+    total_notifications = conn.execute('SELECT COUNT(*) FROM notifications').fetchone()[0]
+    
+    conn.close()
+    
+    return render_template('index.html', 
+                          devices_with_data=devices_with_data,
+                          notifications=notifications,
+                          total_measurements=total_measurements,
+                          total_notifications=total_notifications,
+                          iot_server_available=iot_server_available)
+
+@app.route('/device/<device_id>')
+def device_detail(device_id):
+    conn = get_db_connection()
+    device = conn.execute('SELECT * FROM devices WHERE device_id = ?', (device_id,)).fetchone()
+    measurements = conn.execute(
+        'SELECT * FROM measurements WHERE device_id = ? ORDER BY received_at DESC LIMIT 50',
+        (device_id,)
+    ).fetchall()
+    conn.close()
+    return render_template('device.html', device=device, measurements=measurements)
+
+@app.route('/api/sensor_data', methods=['POST'])
+def receive_sensor_data():
+    """Эндпоинт для приема данных напрямую от устройств"""
+    try:
+        data = request.json
+        
+        # Получаем данные
+        device_eui = data.get('dev_eui', '')
+        hex_data = data.get('data', '')
+        device_id = data.get('device_id', '')
+        
+        # Если device_id не указан, пытаемся определить
+        if not device_id:
+            device_type = detect_device_type(hex_data)
+            if device_type == 'HS0101':
+                device_id = 'HS0101_001'
+            elif device_type == 'TL11':
+                device_id = 'TL11_001'
+        
+        if hex_data:
+            process_device_data(device_eui, hex_data)
+            return jsonify({'status': 'success', 'message': 'Данные получены'})
+        else:
+            return jsonify({'status': 'error', 'message': 'Нет данных'}), 400
+        
+    except Exception as e:
+        print(f"Ошибка при обработке данных: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# Добавьте остальные маршруты из предыдущей версии...
+@app.route('/fetch_data')
+def fetch_data():
+    """Ручной запуск получения данных с возвратом на главную страницу"""
+    try:
+        thread = threading.Thread(target=fetch_iot_data_sync, daemon=True)
+        thread.start()
+        flash('✅ Запрос данных с IoT сервера запущен в фоне', 'success')
+    except Exception as e:
+        flash(f'❌ Ошибка при запуске запроса: {str(e)}', 'error')
+    
+    return redirect(url_for('index'))
+
+@app.route('/send_test_notification')
+def send_test_notification():
+    """Отправка тестового уведомления с возвратом на главную страницу"""
+    message = "🔔 <b>Тестовое уведомление</b>\nЭто тестовое сообщение от системы мониторинга."
+    send_notification_to_all(message)
+    flash('✅ Тестовое уведомление отправлено в Telegram', 'success')
+    return redirect(url_for('index'))
+
+# Добавьте остальные маршруты: /notifications, /settings, /workers
+
+if __name__ == '__main__':
+    # Инициализация
+    init_db()
+    
+    # Получаем начальные данные о чатах Telegram
+    get_telegram_updates(TOKEN)
+    
+    # Запускаем фоновую задачу
+    start_background_tasks()
+    
+    # Запускаем Flask сервер
+    app.run(debug=True, host='0.0.0.0', port=5000)
