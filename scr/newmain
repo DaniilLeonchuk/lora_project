@@ -9,9 +9,10 @@ import time
 import threading
 import requests
 from functools import wraps
+from datetime import datetime, timezone
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here'  # Для работы flash сообщений
+app.secret_key = 'your-secret-key-here'
 
 # Конфигурация
 TOKEN = '7916126911:AAEXs_-9dTaMLXRKZY4-0wUdRFgGl8iTGTY'
@@ -19,7 +20,11 @@ SERVER_URL = "ws://10.101.18.28:8002"
 LOGIN = "temp"
 PASSWORD = "123"
 DEV_EUI_LIST = ["3139303459316A0B", "3036353060319207"]
-# Пороги для уведомлений (можно настроить)
+
+# Интервал получения данных (5 минут в секундах)
+DATA_FETCH_INTERVAL = 1 * 60  # 300 секунд
+
+# Пороги для уведомлений
 THRESHOLDS = {
     'temperature_min': -10,
     'temperature_max': 40,
@@ -33,6 +38,9 @@ telegram_chats = set()
 
 # Флаг для отслеживания состояния соединения
 iot_server_available = False
+
+# Время последнего успешного получения данных
+last_fetch_time = 0
 
 # Инициализация базы данных
 def init_db():
@@ -94,11 +102,11 @@ def init_db():
     cur.execute('''
     INSERT OR REPLACE INTO devices (device_id, name, sensor_type, location) 
     VALUES ('TL11_001', 'Вега ТЛ-11', 'температуры', '')
-''')
+    ''')
     cur.execute('''
     INSERT OR REPLACE INTO devices (device_id, name, sensor_type, location) 
     VALUES ('HS0101_001', 'Вега Smart-HS0101', 'влажности, открытия/закрытия', '')
-''')
+    ''')
     
     conn.commit()
     conn.close()
@@ -123,7 +131,6 @@ def get_telegram_updates(token):
                     chat_id = update['message']['chat']['id']
                     telegram_chats.add(chat_id)
                     
-                    # Сохраняем в базу данных
                     conn = get_db_connection()
                     cur = conn.cursor()
                     cur.execute('''
@@ -155,12 +162,11 @@ def send_telegram_message(token, chat_id, message):
 
 def send_notification_to_all(message):
     """Отправляем уведомление всем подписчикам"""
-    get_telegram_updates(TOKEN)  # Обновляем список чатов
+    get_telegram_updates(TOKEN)
     
     for chat_id in telegram_chats:
         send_telegram_message(TOKEN, chat_id, message)
     
-    # Логируем уведомление в базе данных
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''
@@ -174,6 +180,10 @@ def send_notification_to_all(message):
 def parse_hs0101_data(hex_string):
     """Парсим данные от датчика HS0101"""
     try:
+        if len(hex_string) != 32:
+            print(f"HS0101: Неправильная длина данных: {len(hex_string)}, ожидается 32")
+            return None
+            
         lenghts = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
         result = []
         start = 0
@@ -185,36 +195,33 @@ def parse_hs0101_data(hex_string):
             else:
                 result.append(hex_string[start:])
         
-        packet = result[0].lstrip('0')  # тип пакета
-        battery = int(result[1], 16)  # батарея, %
+        packet = result[0].lstrip('0')
+        battery = int(result[1], 16)
         
-        # Время
+        # Время устройства (только для отладки)
         time_hex = result[5] + result[4] + result[3] + result[2]
-        timestamp = int(time_hex, 16)
-        dt_object = datetime.fromtimestamp(timestamp)
+        device_timestamp = int(time_hex, 16)
+        device_time = datetime.fromtimestamp(device_timestamp)
+        current_time = datetime.now()
+        time_diff = current_time - device_time
+        print(f"⏰ HS0101 Время устройства: {device_time}, Разница с сервером: {time_diff}")
         
-        # Температура
         temp_hex = result[7] + result[6]
         temperature = int(temp_hex, 16) / 10
         
-        # Влажность
         humidity = int(result[8], 16)
         
-        # Состояние датчиков открытия
-        door_open = int(result[9], 16) == 0  # 0 - открыто
-        door_open2 = int(result[10], 16) == 0  # 0 - открыто
+        door_open = int(result[9], 16) == 0
+        door_open2 = int(result[10], 16) == 0
         
-        # Угол отклонения
         corner = int(result[11], 16)
         
-        # Пороги
         low_humidity = int(result[12], 16)
         up_humidity = int(result[13], 16)
         
         low_temperature = int(result[14], 16)
         up_temperature = int(result[15], 16)
         
-        # Корректировка отрицательных температур
         if low_temperature >= 128:
             low_temperature = low_temperature - 256
         
@@ -225,7 +232,6 @@ def parse_hs0101_data(hex_string):
             'device_type': 'HS0101',
             'packet_type': packet,
             'battery': battery,
-            'timestamp': dt_object,
             'temperature': temperature,
             'humidity': humidity,
             'door_open': door_open,
@@ -245,6 +251,10 @@ def parse_hs0101_data(hex_string):
 def parse_tl11_data(hex_string):
     """Парсим данные от датчика TL11"""
     try:
+        if len(hex_string) != 20:
+            print(f"TL11: Неправильная длина данных: {len(hex_string)}, ожидается 20")
+            return None
+            
         lenghts = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
         result = []
         start = 0
@@ -256,26 +266,27 @@ def parse_tl11_data(hex_string):
             else:
                 result.append(hex_string[start:])
         
-        battery = int(result[0], 16)  # батарея, %
+        battery = int(result[0], 16)
         
-        # Время
+        # Время устройства (только для отладки)
         time_hex = result[4] + result[3] + result[2] + result[1]
-        timestamp = int(time_hex, 16)
-        dt_object = datetime.fromtimestamp(timestamp)
+        device_timestamp = int(time_hex, 16)
+        device_time = datetime.fromtimestamp(device_timestamp)
+        current_time = datetime.now()
+        time_diff = current_time - device_time
+        print(f"⏰ TL11 Время устройства: {device_time}, Разница с сервером: {time_diff}")
         
-        # Температуры
         temp_hex = result[6] + result[5]
-        temperature = int(temp_hex, 16) / 10  # температура поддона
+        temperature = int(temp_hex, 16) / 10
         
         temp2_hex = result[8] + result[7]
-        temperature2 = int(temp2_hex, 16) / 10  # температура продукта
+        temperature2 = int(temp2_hex, 16) / 10
         
-        up_temperature = int(result[9], 16)  # верхний порог
+        up_temperature = int(result[9], 16)
         
         return {
             'device_type': 'TL11',
             'battery': battery,
-            'timestamp': dt_object,
             'temperature': temperature,
             'temperature2': temperature2,
             'up_temperature': up_temperature,
@@ -293,16 +304,12 @@ def check_thresholds_and_notify(device_id, data):
     current_time = time.time()
     notification_interval = 5 * 60  # 5 минут в секундах
 
-    # Проверка последней отправки
     last_time = last_notification_time.get(device_id, 0)
     if current_time - last_time < notification_interval:
-        # Меньше 5 минут прошло, не отправляем уведомления
         return False
 
     messages = []
 
-    # (Остальной код проверки порогов остался без изменений)
-    # Проверка температуры
     if 'temperature' in data:
         temp = data['temperature']
         if temp < THRESHOLDS['temperature_min']:
@@ -313,7 +320,7 @@ def check_thresholds_and_notify(device_id, data):
             messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
                           f"Устройство: {device_id}\n"
                           f"Температура выше порога: {temp}°C > {THRESHOLDS['temperature_max']}°C")
-    # Проверка влажности
+    
     if 'humidity' in data:
         humid = data['humidity']
         if humid < THRESHOLDS['humidity_min']:
@@ -324,22 +331,22 @@ def check_thresholds_and_notify(device_id, data):
             messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
                           f"Устройство: {device_id}\n"
                           f"Влажность выше порога: {humid}% > {THRESHOLDS['humidity_max']}%")
-    # Проверка батареи
+    
     if 'battery' in data and data['battery'] < THRESHOLDS['battery_min']:
         messages.append(f"🔋 <b>Низкий заряд батареи!</b>\n"
                        f"Устройство: {device_id}\n"
                        f"Заряд: {data['battery']}% < {THRESHOLDS['battery_min']}%")
-    # Проверка открытия дверей
+    
     if data.get('door_open'):
         messages.append(f"🚨 <b>ДВЕРЬ ОТКРЫТА!</b>\n"
                        f"Устройство: {device_id}\n"
-                       f"Время: {data['timestamp']}")
+                       f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
     if data.get('door_open2'):
         messages.append(f"🚨 <b>ВТОРАЯ ДВЕРЬ ОТКРЫТА!</b>\n"
                        f"Устройство: {device_id}\n"
-                       f"Время: {data['timestamp']}")
+                       f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Отправляем все уведомления и обновляем время
     if messages:
         for message in messages:
             print(f"Отправка уведомления: {message}")
@@ -348,44 +355,55 @@ def check_thresholds_and_notify(device_id, data):
         return True
 
     return False
-# Сохранение данных в базу
+
 def save_measurement(device_id, parsed_data):
-    """Сохраняем данные в базу данных"""
+    """Сохраняем данные в базу данных с временем сервера"""
     conn = get_db_connection()
     cur = conn.cursor()
     
     try:
+        server_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
         if parsed_data['device_type'] == 'HS0101':
             cur.execute('''
                 INSERT INTO measurements 
                 (device_id, temperature, humidity, door_open, door_open2, 
                  battery_level, corner, low_humidity, up_humidity, 
-                 low_temperature, up_temperature, raw_data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (device_id, parsed_data['temperature'], parsed_data['humidity'],
-                  parsed_data['door_open'], parsed_data['door_open2'],
-                  parsed_data['battery'], parsed_data['corner'],
-                  parsed_data['low_humidity'], parsed_data['up_humidity'],
-                  parsed_data['low_temperature'], parsed_data['up_temperature'],
-                  parsed_data['raw_data']))
+                 low_temperature, up_temperature, received_at, raw_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (device_id, 
+                  parsed_data.get('temperature'),
+                  parsed_data.get('humidity'),
+                  parsed_data.get('door_open', False),
+                  parsed_data.get('door_open2', False),
+                  parsed_data.get('battery'),
+                  parsed_data.get('corner'),
+                  parsed_data.get('low_humidity'),
+                  parsed_data.get('up_humidity'),
+                  parsed_data.get('low_temperature'),
+                  parsed_data.get('up_temperature'),
+                  server_time,
+                  parsed_data.get('raw_data', '')))
         
         elif parsed_data['device_type'] == 'TL11':
             cur.execute('''
                 INSERT INTO measurements 
-                (device_id, temperature, temperature2, battery_level, raw_data)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (device_id, parsed_data['temperature'], 
-                  parsed_data['temperature2'], parsed_data['battery'],
-                  parsed_data['raw_data']))
+                (device_id, temperature, temperature2, battery_level, received_at, raw_data)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (device_id, 
+                  parsed_data.get('temperature'),
+                  parsed_data.get('temperature2'),
+                  parsed_data.get('battery'),
+                  server_time,
+                  parsed_data.get('raw_data', '')))
         
         conn.commit()
-        print(f"Данные устройства {device_id} сохранены в базу")
+        print(f"✅ Данные устройства {device_id} сохранены (время: {server_time})")
         
-        # Проверяем пороги
         check_thresholds_and_notify(device_id, parsed_data)
         
     except Exception as e:
-        print(f"Ошибка при сохранении данных: {e}")
+        print(f"❌ Ошибка при сохранении данных: {e}")
         conn.rollback()
     finally:
         conn.close()
@@ -402,7 +420,6 @@ async def fetch_iot_data_async(devEui):
             iot_server_available = True
             print(f"✅ Подключено к серверу {SERVER_URL}")
 
-            # 1. Авторизация
             auth_request = {
                 "cmd": "auth_req",
                 "login": LOGIN,
@@ -416,15 +433,16 @@ async def fetch_iot_data_async(devEui):
                 token = auth_data["token"]
                 print(f"Авторизация успешна. Получен токен: {token}")
 
-                # 2. Запрос данных
                 data_request = {
                     "cmd": "get_data_req",
                     "devEui": devEui,
                     "direction": "UPLINK",
+                    "select":{
+                        "limit": 1
+                    }
                 }
                 await websocket.send(json.dumps(data_request))
                 
-                # 3. Получение и обработка ответа
                 while True:
                     response = await websocket.recv()
                     data = json.loads(response)
@@ -432,14 +450,11 @@ async def fetch_iot_data_async(devEui):
                     if data.get("cmd") == "get_data_resp":
                         print(f"✅ Получены данные устройства {devEui}")
                         
-                        # Обработка данных
                         if "data_list" in data:
                             for item in data["data_list"]:
                                 if "data" in item:
                                     hex_data = item["data"]
-                                    device_id = item.get("devEui", devEui)
                                     
-                                    # Определяем тип устройства и парсим данные
                                     if len(hex_data) == 32:  # HS0101
                                         parsed = parse_hs0101_data(hex_data)
                                         if parsed:
@@ -461,7 +476,6 @@ async def fetch_iot_data_async(devEui):
         iot_server_available = False
         print(f"❌ Ошибка при получении данных для {devEui}: {e}")
 
-  
 def fetch_all_iot_data_sync(dev_eui_list):
     """Запускает асинхронные задачи для всех devEui параллельно"""
     async def run_all():
@@ -476,22 +490,50 @@ def fetch_all_iot_data_sync(dev_eui_list):
         return True, "Все данные успешно получены"
     except Exception as e:
         return False, f"Ошибка: {str(e)}"
-    
-# Фоновая задача для получения данных
+
+def fetch_iot_data_sync():
+    """Синхронная обертка для обратной совместимости"""
+    return fetch_all_iot_data_sync(DEV_EUI_LIST)
+
+# Фоновая задача для получения данных (раз в 5 минут)
 def background_fetch():
-    """Фоновая задача для регулярного получения данных"""
+    """Фоновая задача для регулярного получения данных каждые 5 минут"""
+    global last_fetch_time
+    
     while True:
         try:
-            success, message = fetch_all_iot_data_sync(DEV_EUI_LIST)
-            if success:
-                print(f"✅ {message}")
+            current_time = time.time()
+            
+            # Проверяем, прошло ли 5 минут с последнего получения
+            if current_time - last_fetch_time >= DATA_FETCH_INTERVAL:
+                print(f"\n{'='*50}")
+                print(f"🔄 Начало получения данных ({datetime.now().strftime('%H:%M:%S')})")
+                print(f"Последнее получение: {time.ctime(last_fetch_time) if last_fetch_time > 0 else 'никогда'}")
+                
+                success, message = fetch_all_iot_data_sync(DEV_EUI_LIST)
+                
+                if success:
+                    last_fetch_time = current_time
+                    print(f"✅ {message}")
+                    print(f"Следующее получение через 5 минут ({time.ctime(last_fetch_time + DATA_FETCH_INTERVAL)})")
+                else:
+                    print(f"❌ {message}")
+                
+                print(f"{'='*50}\n")
             else:
-                print(f"❌ {message}")
-            # Ждем 60 секунд перед следующим запросом
-            time.sleep(60)
+                # Рассчитываем оставшееся время до следующего получения
+                remaining = DATA_FETCH_INTERVAL - (current_time - last_fetch_time)
+                if remaining > 60:  # Показываем только если больше минуты
+                    minutes = int(remaining // 60)
+                    seconds = int(remaining % 60)
+                    print(f"⏳ Следующее получение данных через {minutes} мин {seconds} сек", end='\r')
+            
+            # Ждем 10 секунд перед следующей проверкой
+            time.sleep(10)
+            
         except Exception as e:
             print(f"❌ Ошибка в фоновой задаче: {e}")
-            time.sleep(10)
+            time.sleep(30)
 
 # Маршруты Flask
 @app.route('/')
@@ -507,12 +549,24 @@ def index():
         ).fetchone()
         devices_with_data.append((device, last_measurement))
     
-    # Получаем последние уведомления
     notifications = conn.execute('SELECT * FROM notifications ORDER BY sent_at DESC LIMIT 5').fetchall()
     
-    # Получаем статистику
     total_measurements = conn.execute('SELECT COUNT(*) FROM measurements').fetchone()[0]
     total_notifications = conn.execute('SELECT COUNT(*) FROM notifications').fetchone()[0]
+    
+    # Вычисляем время до следующего получения
+    global last_fetch_time
+    current_time = time.time()
+    if last_fetch_time > 0:
+        time_since_last = int(current_time - last_fetch_time)
+        time_until_next = max(0, DATA_FETCH_INTERVAL - time_since_last)
+        minutes = time_until_next // 60
+        seconds = time_until_next % 60
+        next_fetch_info = f"{minutes} мин {seconds} сек"
+        last_fetch_str = time.ctime(last_fetch_time)
+    else:
+        next_fetch_info = "ожидание первого получения"
+        last_fetch_str = "никогда"
     
     conn.close()
     
@@ -521,7 +575,9 @@ def index():
                           notifications=notifications,
                           total_measurements=total_measurements,
                           total_notifications=total_notifications,
-                          iot_server_available=iot_server_available)
+                          iot_server_available=iot_server_available,
+                          last_fetch_time=last_fetch_str,
+                          next_fetch_in=next_fetch_info)
 
 @app.route('/device/<device_id>')
 def device_detail(device_id):
@@ -540,7 +596,6 @@ def receive_sensor_data():
     try:
         data = request.json
         
-        # Определяем тип устройства по данным
         hex_data = data.get('data', '')
         device_id = data.get('device_id', 'unknown')
         
@@ -553,13 +608,13 @@ def receive_sensor_data():
             if parsed:
                 save_measurement(device_id, parsed)
         else:
-            # Сохраняем как сырые данные
             conn = get_db_connection()
             cur = conn.cursor()
+            server_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             cur.execute('''
-                INSERT INTO measurements (device_id, raw_data)
-                VALUES (?, ?)
-            ''', (device_id, hex_data))
+                INSERT INTO measurements (device_id, received_at, raw_data)
+                VALUES (?, ?, ?)
+            ''', (device_id, server_time, hex_data))
             conn.commit()
             conn.close()
         
@@ -571,7 +626,7 @@ def receive_sensor_data():
 
 @app.route('/api/device/<device_id>')
 def api_device_data(device_id):
-    """API для получения данных устройства (для API клиентов)"""
+    """API для получения данных устройства"""
     conn = get_db_connection()
     measurements = conn.execute('''
         SELECT temperature, humidity, door_open, battery_level, rssi, received_at 
@@ -585,10 +640,11 @@ def api_device_data(device_id):
 def fetch_data():
     """Ручной запуск получения данных с возвратом на главную страницу"""
     try:
-        # Запускаем в отдельном потоке
+        global last_fetch_time
+        last_fetch_time = 0  # Сбрасываем таймер для немедленного получения
         thread = threading.Thread(target=fetch_iot_data_sync, daemon=True)
         thread.start()
-        flash('✅ Запрос данных с IoT сервера запущен в фоне', 'success')
+        flash('✅ Запрос данных с IoT сервера запущен немедленно', 'success')
     except Exception as e:
         flash(f'❌ Ошибка при запуске запроса: {str(e)}', 'error')
     
@@ -614,7 +670,6 @@ def show_notifications():
 def settings():
     """Страница настроек"""
     if request.method == 'POST':
-        # Обновляем пороги
         THRESHOLDS['temperature_min'] = float(request.form.get('temperature_min', THRESHOLDS['temperature_min']))
         THRESHOLDS['temperature_max'] = float(request.form.get('temperature_max', THRESHOLDS['temperature_max']))
         THRESHOLDS['humidity_min'] = float(request.form.get('humidity_min', THRESHOLDS['humidity_min']))
@@ -639,17 +694,10 @@ def start_background_tasks():
     """Запускаем фоновые задачи в отдельном потоке"""
     thread = threading.Thread(target=background_fetch, daemon=True)
     thread.start()
-    print("Фоновая задача для получения данных запущена")
+    print("✅ Фоновая задача для получения данных запущена (интервал: 5 минут)")
 
 if __name__ == '__main__':
-    # Инициализация
     init_db()
-    
-    # Получаем начальные данные о чатах Telegram
     get_telegram_updates(TOKEN)
-    
-    # Запускаем фоновую задачу
     start_background_tasks()
-    
-    # Запускаем Flask сервер
     app.run(debug=True, host='0.0.0.0', port=5000)
