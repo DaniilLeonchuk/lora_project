@@ -679,7 +679,7 @@ def start_background_tasks():
     """Запускаем фоновые задачи в отдельном потоке"""
     thread = threading.Thread(target=background_fetch, daemon=True)
     thread.start()
-    print("✅ Фоновая задача для получения данных запущена (интервал: 5 минут)")
+    print("✅ Фоновая задача для получения данных запущена (интервал: 1 минута)")
 
 if __name__ == '__main__':
     init_db()
