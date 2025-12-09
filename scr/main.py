@@ -422,37 +422,48 @@ async def fetch_iot_data_async(devEui):
                     "cmd": "get_data_req",
                     "devEui": devEui,
                     "direction": "UPLINK",
-                    "select":{
-                        "limit": 1
+                    "select": {
+                        "limit": 1  # Запрашиваем только 1 запись
                     }
                 }
                 await websocket.send(json.dumps(data_request))
                 
-                while True:
-                    response = await websocket.recv()
-                    data = json.loads(response)
+                # Получаем и обрабатываем только ОДИН ответ
+                response = await websocket.recv()
+                data = json.loads(response)
+                
+                if data.get("cmd") == "get_data_resp":
+                    print(f"✅ Получены данные устройства {devEui}")
                     
-                    if data.get("cmd") == "get_data_resp":
-                        print(f"✅ Получены данные устройства {devEui}")
+                    if "data_list" in data:
+                        # Обрабатываем только первые N записей (по limit)
+                        limit = data_request["select"]["limit"]
+                        for i, item in enumerate(data["data_list"]):
+                            if i >= limit:  # Ограничиваем количество обрабатываемых записей
+                                break
+                                
+                            if "data" in item:
+                                hex_data = item["data"]
+                                
+                                if len(hex_data) == 32:  # HS0101
+                                    parsed = parse_hs0101_data(hex_data)
+                                    if parsed:
+                                        save_measurement("HS0101_001", parsed)
+                                        print(f"Обработана запись {i+1} для HS0101")
+                                elif len(hex_data) == 20:  # TL11
+                                    parsed = parse_tl11_data(hex_data)
+                                    if parsed:
+                                        save_measurement("TL11_001", parsed)
+                                        print(f"Обработана запись {i+1} для TL11")
+                    else:
+                        print(f"Нет данных в ответе для {devEui}")
                         
-                        if "data_list" in data:
-                            for item in data["data_list"]:
-                                if "data" in item:
-                                    hex_data = item["data"]
-                                    
-                                    if len(hex_data) == 32:  # HS0101
-                                        parsed = parse_hs0101_data(hex_data)
-                                        if parsed:
-                                            save_measurement("HS0101_001", parsed)
-                                    elif len(hex_data) == 20:  # TL11
-                                        parsed = parse_tl11_data(hex_data)
-                                        if parsed:
-                                            save_measurement("TL11_001", parsed)
-                        
-                        break
-                    elif data.get("status") is False:
-                        print(f"Ошибка при запросе данных для {devEui}: {data.get('err_string')}")
-                        break
+                elif data.get("status") is False:
+                    print(f"Ошибка при запросе данных для {devEui}: {data.get('err_string')}")
+                    
+                # Немедленно закрываем соединение после получения данных
+                await websocket.close()
+                print(f"Соединение для {devEui} закрыто")
 
             else:
                 print(f"Ошибка авторизации для {devEui}: {auth_data.get('err_string', 'Неизвестная ошибка')}")
