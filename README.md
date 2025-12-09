@@ -81,6 +81,7 @@
 ### Требования
 - Python 3.8+
 - pip (менеджер пакетов Python)
+- pip install Flask websockets requests
 
 ### Установка
 
