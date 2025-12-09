@@ -323,12 +323,12 @@ def check_thresholds_and_notify(device_id, data):
                        f"Заряд: {data['battery']}% < {THRESHOLDS['battery_min']}%")
     
     if data.get('door_open'):
-        messages.append(f"🚨 <b>Первая дверь открыта!</b>\n"
+        messages.append(f"<b>Первая дверь открыта!</b>\n"
                        f"Устройство: {device_id}\n"
                        f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     if data.get('door_open2'):
-        messages.append(f"🚨 <b>Вторая дверь открыта!</b>\n"
+        messages.append(f"<b>Вторая дверь открыта!</b>\n"
                        f"Устройство: {device_id}\n"
                        f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
