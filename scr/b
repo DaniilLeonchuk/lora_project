@@ -1,0 +1,55 @@
+def save_measurement(device_id, parsed_data):
+    """Сохраняем данные в базу данных с временем сервера"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # Используем timestamp от сервера если есть, иначе текущее время
+        if 'server_timestamp' in parsed_data:
+            server_time = datetime.fromtimestamp(parsed_data['server_timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            server_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        if parsed_data['device_type'] == 'HS0101':
+            cur.execute('''
+                INSERT INTO measurements 
+                (device_id, temperature, humidity, door_open, door_open2, 
+                 battery_level, corner, low_humidity, up_humidity, 
+                 low_temperature, up_temperature, received_at, raw_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (device_id, 
+                  parsed_data.get('temperature'),
+                  parsed_data.get('humidity'),
+                  parsed_data.get('door_open', False),
+                  parsed_data.get('door_open2', False),
+                  parsed_data.get('battery'),
+                  parsed_data.get('corner'),
+                  parsed_data.get('low_humidity'),
+                  parsed_data.get('up_humidity'),
+                  parsed_data.get('low_temperature'),
+                  parsed_data.get('up_temperature'),
+                  server_time,
+                  parsed_data.get('raw_data', '')))
+        
+        elif parsed_data['device_type'] == 'TL11':
+            cur.execute('''
+                INSERT INTO measurements 
+                (device_id, temperature, temperature2, battery_level, received_at, raw_data)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (device_id, 
+                  parsed_data.get('temperature'),
+                  parsed_data.get('temperature2'),
+                  parsed_data.get('battery'),
+                  server_time,
+                  parsed_data.get('raw_data', '')))
+        
+        conn.commit()
+        print(f"✅ Данные устройства {device_id} сохранены (время: {server_time})")
+        
+        check_thresholds_and_notify(device_id, parsed_data)
+        
+    except Exception as e:
+        print(f"❌ Ошибка при сохранении данных: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
