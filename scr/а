@@ -1,0 +1,92 @@
+# Замените функцию fetch_iot_data_async на эту версию:
+
+async def fetch_iot_data_async(devEui):
+    """Асинхронная функция для получения только последних данных с IoT сервера для конкретного devEui"""
+    global iot_server_available
+    
+    try:
+        print(f"🔄 Получение последних данных для DEV_EUI={devEui}...")
+        
+        async with websockets.connect(SERVER_URL, open_timeout=10, close_timeout=5) as websocket:
+            iot_server_available = True
+            print(f"✅ Подключено к серверу {SERVER_URL}")
+
+            auth_request = {
+                "cmd": "auth_req",
+                "login": LOGIN,
+                "password": PASSWORD
+            }
+            await websocket.send(json.dumps(auth_request))
+            auth_response = await websocket.recv()
+            auth_data = json.loads(auth_response)
+
+            if auth_data.get("status") is True and "token" in auth_data:
+                token = auth_data["token"]
+                print(f"Авторизация успешна. Получен токен: {token}")
+
+                # Запрашиваем только последние данные (1 запись)
+                data_request = {
+                    "cmd": "get_data_req",
+                    "devEui": devEui,
+                    "direction": "UPLINK",
+                    "dataAmount": 1,  # Запрашиваем только 1 последнее сообщение
+                    "pageNum": 1      # Первая страница
+                }
+                await websocket.send(json.dumps(data_request))
+                
+                response = await websocket.recv()
+                data = json.loads(response)
+                
+                if data.get("cmd") == "get_data_resp":
+                    print(f"✅ Получены последние данные устройства {devEui}")
+                    
+                    if "data_list" in data and len(data["data_list"]) > 0:
+                        for item in data["data_list"]:
+                            if "data" in item:
+                                hex_data = item["data"]
+                                print(f"📦 Получены данные ({len(hex_data)} символов): {hex_data}")
+                                
+                                # Получаем timestamp из сообщения (если есть)
+                                timestamp = item.get("timestamp")
+                                if timestamp:
+                                    device_time = datetime.fromtimestamp(timestamp)
+                                    current_time = datetime.now()
+                                    time_diff = current_time - device_time
+                                    print(f"⏰ Время устройства: {device_time}, Разница: {time_diff}")
+                                
+                                # Определяем тип устройства по длине данных
+                                if len(hex_data) == 32:  # HS0101
+                                    parsed = parse_hs0101_data(hex_data)
+                                    if parsed:
+                                        # Добавляем timestamp из сервера, если есть
+                                        if timestamp:
+                                            parsed['server_timestamp'] = timestamp
+                                        save_measurement("HS0101_001", parsed)
+                                        print(f"✅ HS0101 данные сохранены")
+                                elif len(hex_data) == 20:  # TL11
+                                    parsed = parse_tl11_data(hex_data)
+                                    if parsed:
+                                        if timestamp:
+                                            parsed['server_timestamp'] = timestamp
+                                        save_measurement("TL11_001", parsed)
+                                        print(f"✅ TL11 данные сохранены")
+                                else:
+                                    print(f"⚠️ Неизвестный формат данных: длина {len(hex_data)}")
+                    else:
+                        print(f"ℹ️ Для устройства {devEui} нет новых данных")
+                
+                elif data.get("status") is False:
+                    print(f"❌ Ошибка при запросе данных для {devEui}: {data.get('err_string')}")
+
+            else:
+                print(f"❌ Ошибка авторизации для {devEui}: {auth_data.get('err_string', 'Неизвестная ошибка')}")
+
+    except websockets.exceptions.ConnectionClosed:
+        iot_server_available = False
+        print(f"❌ Соединение с сервером разорвано для {devEui}")
+    except asyncio.TimeoutError:
+        iot_server_available = False
+        print(f"⏱️ Таймаут подключения к серверу для {devEui}")
+    except Exception as e:
+        iot_server_available = False
+        print(f"❌ Ошибка при получении данных для {devEui}: {e}")
