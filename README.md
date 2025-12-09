@@ -81,11 +81,13 @@
 ### Требования
 - Python 3.8+
 - pip (менеджер пакетов Python)
-- pip install Flask websockets requests
+- Flask
+- websockets
+- requests
 
 ### Установка
 
 1. **Клонируйте репозиторий:**
 ```bash
 git clone https://github.com/DaniilLeonchuk/lora_project.git
-cd lora_project
+pip install Flask websockets requests
