@@ -21,8 +21,7 @@ LOGIN = "temp"
 PASSWORD = "123"
 DEV_EUI_LIST = ["3139303459316A0B", "3036353060319207"]
 
-# Интервал получения данных (5 минут в секундах)
-DATA_FETCH_INTERVAL = 1 * 60  # 300 секунд
+DATA_FETCH_INTERVAL = 10 # 10 секунд
 
 # Пороги для уведомлений
 THRESHOLDS = {
@@ -111,6 +110,9 @@ def init_db():
     conn.commit()
     conn.close()
     print("База данных инициализирована")
+    
+    # Загружаем последние состояния дверей
+    load_last_door_states()
 
 def get_db_connection():
     conn = sqlite3.connect('lora.db')
@@ -283,64 +285,122 @@ def parse_tl11_data(hex_string):
         return None
 
 last_notification_time = {}
+last_door_state = {}
 
 def check_thresholds_and_notify(device_id, data):
-    """Проверяем данные на превышение порогов и отправляем уведомления не чаще раз в 5 минут"""
+    """Проверяем данные на превышение порогов и отправляем уведомления при изменении состояния"""
     current_time = time.time()
-    notification_interval = 5 * 60  # 5 минут в секундах
-
-    last_time = last_notification_time.get(device_id, 0)
-    if current_time - last_time < notification_interval:
-        return False
-
+    notification_interval = 5 * 60  # 5 минут в секундах для других уведомлений
+    
     messages = []
-
+    
+    # Проверка состояния дверей (с отслеживанием изменений)
+    if 'door_open' in data or 'door_open2' in data:
+        # Инициализируем состояние дверей для устройства, если еще не существует
+        if device_id not in last_door_state:
+            last_door_state[device_id] = {
+                'door1': None,
+                'door2': None,
+                'last_notify_time': {'door1': 0, 'door2': 0}
+            }
+        
+        door_state = last_door_state[device_id]
+        
+        # Проверка первой двери
+        if 'door_open' in data:
+            current_door1 = data['door_open']
+            last_door1 = door_state['door1']
+            last_notify_time_door1 = door_state['last_notify_time']['door1']
+            
+            # Отправляем уведомление только при изменении состояния
+            if last_door1 is not None and current_door1 != last_door1:
+                # И только если прошло больше 10 секунд с последнего уведомления о двери
+                if current_time - last_notify_time_door1 >= 10:
+                    action = "открылась" if current_door1 else "закрылась"
+                    messages.append(f"🚪 <b>Дверь 1 {action}!</b>\n"
+                                   f"Устройство: {device_id}\n"
+                                   f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    door_state['last_notify_time']['door1'] = current_time
+            
+            # Обновляем последнее состояние
+            door_state['door1'] = current_door1
+        
+        # Проверка второй двери
+        if 'door_open2' in data:
+            current_door2 = data['door_open2']
+            last_door2 = door_state['door2']
+            last_notify_time_door2 = door_state['last_notify_time']['door2']
+            
+            # Отправляем уведомление только при изменении состояния
+            if last_door2 is not None and current_door2 != last_door2:
+                # И только если прошло больше 10 секунд с последнего уведомления о двери
+                if current_time - last_notify_time_door2 >= 10:
+                    action = "открылась" if current_door2 else "закрылась"
+                    messages.append(f"🚪 <b>Дверь 2 {action}!</b>\n"
+                                   f"Устройство: {device_id}\n"
+                                   f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    door_state['last_notify_time']['door2'] = current_time
+            
+            # Обновляем последнее состояние
+            door_state['door2'] = current_door2
+    
+    # Проверка других пороговых значений (с интервалом 5 минут)
+    notification_keys = {
+        'temperature': f"{device_id}_temp",
+        'humidity': f"{device_id}_humid",
+        'battery': f"{device_id}_battery"
+    }
+    
+    # Проверка температуры
     if 'temperature' in data:
         temp = data['temperature']
-        if temp < THRESHOLDS['temperature_min']:
+        last_time = last_notification_time.get(notification_keys['temperature'], 0)
+        
+        if temp < THRESHOLDS['temperature_min'] and (current_time - last_time >= notification_interval):
             messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
                           f"Устройство: {device_id}\n"
                           f"Температура ниже порога: {temp}°C < {THRESHOLDS['temperature_min']}°C")
-        elif temp > THRESHOLDS['temperature_max']:
+            last_notification_time[notification_keys['temperature']] = current_time
+        elif temp > THRESHOLDS['temperature_max'] and (current_time - last_time >= notification_interval):
             messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
                           f"Устройство: {device_id}\n"
                           f"Температура выше порога: {temp}°C > {THRESHOLDS['temperature_max']}°C")
+            last_notification_time[notification_keys['temperature']] = current_time
     
+    # Проверка влажности
     if 'humidity' in data:
         humid = data['humidity']
-        if humid < THRESHOLDS['humidity_min']:
+        last_time = last_notification_time.get(notification_keys['humidity'], 0)
+        
+        if humid < THRESHOLDS['humidity_min'] and (current_time - last_time >= notification_interval):
             messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
                           f"Устройство: {device_id}\n"
                           f"Влажность ниже порога: {humid}% < {THRESHOLDS['humidity_min']}%")
-        elif humid > THRESHOLDS['humidity_max']:
+            last_notification_time[notification_keys['humidity']] = current_time
+        elif humid > THRESHOLDS['humidity_max'] and (current_time - last_time >= notification_interval):
             messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
                           f"Устройство: {device_id}\n"
                           f"Влажность выше порога: {humid}% > {THRESHOLDS['humidity_max']}%")
+            last_notification_time[notification_keys['humidity']] = current_time
     
-    if 'battery' in data and data['battery'] < THRESHOLDS['battery_min']:
-        messages.append(f"🔋 <b>Низкий заряд батареи!</b>\n"
-                       f"Устройство: {device_id}\n"
-                       f"Заряд: {data['battery']}% < {THRESHOLDS['battery_min']}%")
-    
-    if data.get('door_open'):
-        messages.append(f"<b>Первая дверь открыта!</b>\n"
-                       f"Устройство: {device_id}\n"
-                       f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    if data.get('door_open2'):
-        messages.append(f"<b>Вторая дверь открыта!</b>\n"
-                       f"Устройство: {device_id}\n"
-                       f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # Проверка батареи
+    if 'battery' in data:
+        battery = data['battery']
+        last_time = last_notification_time.get(notification_keys['battery'], 0)
+        
+        if battery < THRESHOLDS['battery_min'] and (current_time - last_time >= notification_interval):
+            messages.append(f"🔋 <b>Низкий заряд батареи!</b>\n"
+                           f"Устройство: {device_id}\n"
+                           f"Заряд: {battery}% < {THRESHOLDS['battery_min']}%")
+            last_notification_time[notification_keys['battery']] = current_time
     
     if messages:
         for message in messages:
             print(f"Отправка уведомления: {message}")
             send_notification_to_all(message)
-        last_notification_time[device_id] = current_time
         return True
 
     return False
-
 def save_measurement(device_id, parsed_data):
     """Сохраняем данные в базу данных с временем сервера"""
     conn = get_db_connection()
@@ -423,45 +483,43 @@ async def fetch_iot_data_async(devEui):
                     "devEui": devEui,
                     "direction": "UPLINK",
                     "select": {
-                        "limit": 1  # Запрашиваем только 1 запись
+                        "limit": 1,
+                        "order": "desc"  # Добавляем сортировку по убыванию
                     }
                 }
                 await websocket.send(json.dumps(data_request))
                 
-                # Получаем и обрабатываем только ОДИН ответ
-                response = await websocket.recv()
-                data = json.loads(response)
-                
-                if data.get("cmd") == "get_data_resp":
-                    print(f"✅ Получены данные устройства {devEui}")
+                # Устанавливаем таймаут для получения ответа
+                try:
+                    response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                    data = json.loads(response)
                     
-                    if "data_list" in data:
-                        # Обрабатываем только первые N записей (по limit)
-                        limit = data_request["select"]["limit"]
-                        for i, item in enumerate(data["data_list"]):
-                            if i >= limit:  # Ограничиваем количество обрабатываемых записей
-                                break
-                                
-                            if "data" in item:
-                                hex_data = item["data"]
-                                
-                                if len(hex_data) == 32:  # HS0101
-                                    parsed = parse_hs0101_data(hex_data)
-                                    if parsed:
-                                        save_measurement("HS0101_001", parsed)
-                                        print(f"Обработана запись {i+1} для HS0101")
-                                elif len(hex_data) == 20:  # TL11
-                                    parsed = parse_tl11_data(hex_data)
-                                    if parsed:
-                                        save_measurement("TL11_001", parsed)
-                                        print(f"Обработана запись {i+1} для TL11")
-                    else:
-                        print(f"Нет данных в ответе для {devEui}")
+                    if data.get("cmd") == "get_data_resp":
+                        print(f"✅ Получены данные устройства {devEui}")
                         
-                elif data.get("status") is False:
-                    print(f"Ошибка при запросе данных для {devEui}: {data.get('err_string')}")
-                    
-                # Немедленно закрываем соединение после получения данных
+                        if "data_list" in data and data["data_list"]:
+                            for item in data["data_list"]:
+                                if "data" in item:
+                                    hex_data = item["data"]
+                                    
+                                    if len(hex_data) == 32:  # HS0101
+                                        parsed = parse_hs0101_data(hex_data)
+                                        if parsed:
+                                            save_measurement("HS0101_001", parsed)
+                                    elif len(hex_data) == 20:  # TL11
+                                        parsed = parse_tl11_data(hex_data)
+                                        if parsed:
+                                            save_measurement("TL11_001", parsed)
+                        else:
+                            print(f"Нет данных для устройства {devEui}")
+                        
+                    elif data.get("status") is False:
+                        print(f"Ошибка при запросе данных для {devEui}: {data.get('err_string')}")
+                
+                except asyncio.TimeoutError:
+                    print(f"Таймаут при ожидании данных для {devEui}")
+                
+                # Закрываем соединение после получения данных
                 await websocket.close()
                 print(f"Соединение для {devEui} закрыто")
 
@@ -511,7 +569,7 @@ def background_fetch():
                 if success:
                     last_fetch_time = current_time
                     print(f"✅ {message}")
-                    print(f"Следующее получение через 1 минут ({time.ctime(last_fetch_time + DATA_FETCH_INTERVAL)})")
+                    print(f"Следующее получение через 10 секунд ({time.ctime(last_fetch_time + DATA_FETCH_INTERVAL)})")
                 else:
                     print(f"❌ {message}")
                 
@@ -530,6 +588,37 @@ def background_fetch():
         except Exception as e:
             print(f"❌ Ошибка в фоновой задаче: {e}")
             time.sleep(30)
+def load_last_door_states():
+    """Загружаем последние состояния дверей из базы данных при запуске"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Получаем последние измерения для каждого устройства
+    devices = cur.execute('SELECT DISTINCT device_id FROM devices').fetchall()
+    
+    for device_row in devices:
+        device_id = device_row['device_id']
+        
+        # Получаем последнее измерение для устройства
+        last_measurement = cur.execute('''
+            SELECT door_open, door_open2 FROM measurements 
+            WHERE device_id = ? 
+            ORDER BY received_at DESC LIMIT 1
+        ''', (device_id,)).fetchone()
+        
+        if last_measurement:
+            door1 = last_measurement['door_open']
+            door2 = last_measurement['door_open2']
+            
+            if door1 is not None or door2 is not None:
+                last_door_state[device_id] = {
+                    'door1': door1,
+                    'door2': door2,
+                    'last_notify_time': {'door1': 0, 'door2': 0}
+                }
+                print(f"Загружено состояние дверей для {device_id}: дверь1={door1}, дверь2={door2}")
+    
+    conn.close()
 
 # Маршруты Flask
 @app.route('/')
@@ -638,6 +727,10 @@ def fetch_data():
     try:
         global last_fetch_time
         last_fetch_time = 0  # Сбрасываем таймер для немедленного получения
+        
+        # Перезагружаем состояния дверей перед получением новых данных
+        load_last_door_states()
+        
         thread = threading.Thread(target=fetch_iot_data_sync, daemon=True)
         thread.start()
         flash('✅ Запрос данных с IoT сервера запущен немедленно', 'success')
@@ -690,7 +783,7 @@ def start_background_tasks():
     """Запускаем фоновые задачи в отдельном потоке"""
     thread = threading.Thread(target=background_fetch, daemon=True)
     thread.start()
-    print("✅ Фоновая задача для получения данных запущена (интервал: 1 минута)")
+    print("✅ Фоновая задача для получения данных запущена (интервал: 5 минут)")
 
 if __name__ == '__main__':
     init_db()
