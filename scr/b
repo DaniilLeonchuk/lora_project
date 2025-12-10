@@ -1,0 +1,117 @@
+# Глобальный словарь для хранения последнего состояния дверей
+last_door_state = {}
+
+def check_thresholds_and_notify(device_id, data):
+    """Проверяем данные на превышение порогов и отправляем уведомления при изменении состояния"""
+    current_time = time.time()
+    notification_interval = 5 * 60  # 5 минут в секундах для других уведомлений
+    
+    messages = []
+    
+    # Проверка состояния дверей (с отслеживанием изменений)
+    if 'door_open' in data or 'door_open2' in data:
+        # Инициализируем состояние дверей для устройства, если еще не существует
+        if device_id not in last_door_state:
+            last_door_state[device_id] = {
+                'door1': None,
+                'door2': None,
+                'last_notify_time': {'door1': 0, 'door2': 0}
+            }
+        
+        door_state = last_door_state[device_id]
+        
+        # Проверка первой двери
+        if 'door_open' in data:
+            current_door1 = data['door_open']
+            last_door1 = door_state['door1']
+            last_notify_time_door1 = door_state['last_notify_time']['door1']
+            
+            # Отправляем уведомление только при изменении состояния
+            if last_door1 is not None and current_door1 != last_door1:
+                # И только если прошло больше 10 секунд с последнего уведомления о двери
+                if current_time - last_notify_time_door1 >= 10:
+                    action = "открылась" if current_door1 else "закрылась"
+                    messages.append(f"🚪 <b>Дверь 1 {action}!</b>\n"
+                                   f"Устройство: {device_id}\n"
+                                   f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    door_state['last_notify_time']['door1'] = current_time
+            
+            # Обновляем последнее состояние
+            door_state['door1'] = current_door1
+        
+        # Проверка второй двери
+        if 'door_open2' in data:
+            current_door2 = data['door_open2']
+            last_door2 = door_state['door2']
+            last_notify_time_door2 = door_state['last_notify_time']['door2']
+            
+            # Отправляем уведомление только при изменении состояния
+            if last_door2 is not None and current_door2 != last_door2:
+                # И только если прошло больше 10 секунд с последнего уведомления о двери
+                if current_time - last_notify_time_door2 >= 10:
+                    action = "открылась" if current_door2 else "закрылась"
+                    messages.append(f"🚪 <b>Дверь 2 {action}!</b>\n"
+                                   f"Устройство: {device_id}\n"
+                                   f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    door_state['last_notify_time']['door2'] = current_time
+            
+            # Обновляем последнее состояние
+            door_state['door2'] = current_door2
+    
+    # Проверка других пороговых значений (с интервалом 5 минут)
+    notification_keys = {
+        'temperature': f"{device_id}_temp",
+        'humidity': f"{device_id}_humid",
+        'battery': f"{device_id}_battery"
+    }
+    
+    # Проверка температуры
+    if 'temperature' in data:
+        temp = data['temperature']
+        last_time = last_notification_time.get(notification_keys['temperature'], 0)
+        
+        if temp < THRESHOLDS['temperature_min'] and (current_time - last_time >= notification_interval):
+            messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
+                          f"Устройство: {device_id}\n"
+                          f"Температура ниже порога: {temp}°C < {THRESHOLDS['temperature_min']}°C")
+            last_notification_time[notification_keys['temperature']] = current_time
+        elif temp > THRESHOLDS['temperature_max'] and (current_time - last_time >= notification_interval):
+            messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
+                          f"Устройство: {device_id}\n"
+                          f"Температура выше порога: {temp}°C > {THRESHOLDS['temperature_max']}°C")
+            last_notification_time[notification_keys['temperature']] = current_time
+    
+    # Проверка влажности
+    if 'humidity' in data:
+        humid = data['humidity']
+        last_time = last_notification_time.get(notification_keys['humidity'], 0)
+        
+        if humid < THRESHOLDS['humidity_min'] and (current_time - last_time >= notification_interval):
+            messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
+                          f"Устройство: {device_id}\n"
+                          f"Влажность ниже порога: {humid}% < {THRESHOLDS['humidity_min']}%")
+            last_notification_time[notification_keys['humidity']] = current_time
+        elif humid > THRESHOLDS['humidity_max'] and (current_time - last_time >= notification_interval):
+            messages.append(f"⚠️ <b>ВНИМАНИЕ!</b>\n"
+                          f"Устройство: {device_id}\n"
+                          f"Влажность выше порога: {humid}% > {THRESHOLDS['humidity_max']}%")
+            last_notification_time[notification_keys['humidity']] = current_time
+    
+    # Проверка батареи
+    if 'battery' in data:
+        battery = data['battery']
+        last_time = last_notification_time.get(notification_keys['battery'], 0)
+        
+        if battery < THRESHOLDS['battery_min'] and (current_time - last_time >= notification_interval):
+            messages.append(f"🔋 <b>Низкий заряд батареи!</b>\n"
+                           f"Устройство: {device_id}\n"
+                           f"Заряд: {battery}% < {THRESHOLDS['battery_min']}%")
+            last_notification_time[notification_keys['battery']] = current_time
+    
+    if messages:
+        for message in messages:
+            print(f"Отправка уведомления: {message}")
+            send_notification_to_all(message)
+        return True
+
+    return False
